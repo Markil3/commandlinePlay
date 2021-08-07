@@ -1,0 +1,272 @@
+#!/usr/bin/env python
+import pathlib
+from pathlib import Path
+from urllib import parse
+import subprocess
+import sys
+import random
+from os.path import exists
+import sqlite3
+
+'''
+A sorting method for songs. It works by pushing file names with more matches up higher.
+'''
+def getValueFunction(terms):
+    def valOfResult(song):
+        val = 0
+        for arg in terms:
+            for part in song[2:]:
+                if arg in part.lower():
+                    val -= 1
+                    # Double every point received by a playlist
+                    if song[0] == True:
+                        val -= 1
+        #print("%s got %d hits" % (song, val))
+        return val
+    return valOfResult
+
+'''
+Merges certain words into one. This is helpful for voice commands
+'''
+def mergeWords(argList):
+    i = 0
+    quoting = False
+    while i < len(argList):
+        # Merge underscore for handling later
+        if quoting:
+            if argList[i] != "unquote":
+                argList[i - 1] = argList[i - 1] + " " + argList[i]
+            else:
+                quoting = False
+            del argList[i]
+            i -= 1
+        elif argList[i] == "quote":
+            quoting = True
+            del argList[i]
+        elif i < len(argList) - 1 and argList[i] == "under" and argList[i + 1] == "score":
+            argList[i] = "underscore"
+            del argList[i + 1]
+        elif i < len(argList) - 1 and argList[i] == "play" and argList[i + 1] == "list":
+            argList[i] = "playlist"
+            del argList[i + 1]
+        if argList[i] == "dot":
+            argList[i - 1] = argList[i - 1] + "."
+            del argList[i]
+            i -= 1
+        elif argList[i] == "underscore":
+            argList[i - 1] = argList[i - 1] + "_"
+            del argList[i]
+            i -= 1
+        elif i < len(argList) - 1 and argList[i] == "dash":
+            argList[i] = "-" + argList[i + 1]
+            del argList[i + 1]
+        elif argList[i - 1].endswith(".") or argList[i - 1].endswith("_"):
+            argList[i - 1] = argList[i - 1] + argList[i]
+            del argList[i]
+            i -= 1
+        i += 1
+            
+    return argList
+
+def extractOptions(args):
+    options = {}
+    i = 0
+    while i < len(args):
+        # Some dashed fields have special meanings.
+        if args[i].startswith("-") and args[i] != "-or" and args[i] != "-and" and args[i] != "--or" and args[i] != "--and":
+            if args[i].startswith("--"):
+                if "=" in args[i]:
+                    options[args[i][2:args[i].index("=")]] = args[i][args[i].index("=") + 1:]
+                else:
+                    options[args[i][2:]] = True
+            # These two have special meanings
+            else:
+                for char in args[i][1:]:
+                    options[char] = True
+            del args[i]
+        elif args[i] == "playlist" or args[i] == "m3u":
+            options["playlist"] = True
+            del args[i]
+        elif args[i].endswith(".m3u"):
+            options["playlist"] = True
+            args[i] = args[i][0:args[i].rindex(".m3u")]
+            i += 1
+        else:
+            i += 1
+    return options
+
+def searchFiles(terms, options):
+    musicHome = Path(Path.home(), "Music")
+    if not musicHome.is_dir():
+        # We are probably on Windows
+        musicHome = Path(Path.home(), "My Music")
+    
+    findArgs = ["find", str(musicHome)]
+    terms = appendSearchArguments(findArgs, sys.argv[1:], options)
+    print(" ".join(findArgs))
+    print()
+    process = subprocess.Popen(findArgs, stdout=subprocess.PIPE)
+    output, error = process.communicate()
+    files = output.decode().split("\n")
+    # Remove any empty things
+    while "" in files:
+        files.remove("")
+    return files
+
+'''
+Compiles all arguments in the argument list into a SQLite search term
+
+@return A set of search terms provided, stripped of all extra arguments.
+'''
+def appendDatabaseArguments(argList, args, options, playlist):
+    notArgs = []
+    terms = set()
+    if len(args) > 0:
+        for arg in args:
+            if arg.startswith("!"):
+                notArgs.append(arg[1:])
+            elif arg == "AND" or arg == "and" or arg == "-and" or arg =="--and" or arg == "&&":
+                # Override whatever AND/OR we had before
+                argList.pop()
+                argList.append("AND")
+            elif arg == "OR" or arg == "or" or arg == "-or" or arg =="--or" or arg == "||":
+                # Override whatever AND/OR we had before
+                argList.pop()
+                argList.append("OR")
+            else:
+                argList.append("(")
+                if playlist:
+                    argList.append("playlists.name")
+                    argList.append("LIKE")
+                    argList.append("'%" + arg + "%'")
+                else:
+                    argList.append("tracks.name")
+                    argList.append("LIKE")
+                    argList.append("'%" + arg + "%'")
+                    argList.append("OR")
+                    argList.append("albums.name")
+                    argList.append("LIKE")
+                    argList.append("'%" + arg + "%'")
+                    argList.append("OR")
+                    argList.append("artists.name")
+                    argList.append("LIKE")
+                    argList.append("'%" + arg + "%'")
+                argList.append(")")
+                terms.add(arg)
+                if "a" in options:
+                    argList.append("AND")
+                else:
+                    argList.append("OR")
+        if argList[len(argList) - 1] == "AND" or argList[len(argList) - 1] == "OR":
+            argList.pop()
+        if len(notArgs) > 0:
+            argList.append("AND")
+            for arg in notArgs:
+                argList.append("tracks.name")
+                argList.append("NOT")
+                argList.append("LIKE")
+                argList.append("'%" + arg + "%'")
+                argList.append("AND")
+            argList.pop()
+    return terms
+
+def searchDatabase(options):
+    files = []
+    
+    if "directory" in options:
+        dbDir = Path(options["directory"])
+    else:
+        dbDir = Path(Path.home(), ".local/share/lollypop")
+    
+    if "playlist" in options:
+        db = sqlite3.connect(str(Path(dbDir, "playlists.db")))
+        findArgs = "SELECT tracks.uri, playlists.name FROM tracks INNER JOIN playlists ON tracks.playlist_id = playlists.id WHERE".split(" ")
+        terms = appendDatabaseArguments(findArgs, sys.argv[1:], options, True)
+        findArgs = " ".join(findArgs) + ";"
+        results = db.execute(findArgs);
+        for row in results:
+            files.append((True,) + row)
+        db.close()
+    db = sqlite3.connect(str(Path(dbDir, "lollypop.db")))
+    findArgs = "SELECT tracks.uri, tracks.name, albums.name, artists.name FROM tracks INNER JOIN albums ON tracks.album_id = albums.id INNER JOIN track_artists ON tracks.id = track_artists.track_id INNER JOIN artists ON track_artists.artist_id = artists.id WHERE".split(" ")
+    terms = appendDatabaseArguments(findArgs, sys.argv[1:], options, False)
+    findArgs = " ".join(findArgs) + ";"
+    results = db.execute(findArgs);
+    for row in results:
+        files.append((False,) + row)
+    db.close()
+    
+    return (files, terms)
+
+if __name__ == "__main__":
+    # Checks if VLC is installed
+    missing = subprocess.call("command -v vlc >> /dev/null", shell=True)
+    if missing:
+        print("VLC Media Player is not installed", file=sys.stderr)
+        exit(1)
+    
+    print(sys.argv)
+    mergeWords(sys.argv)
+    options = extractOptions(sys.argv)
+    if "h" in options or "help" in options:
+        print("""Usage: %s [OPTIONS]... [TERM]...
+Searches for a song within the music collection
+
+OPTIONS:
+--directory=[dir]       Define the database directory.
+-a                      The search must match every single term
+-v                      Displays the media player
+-l                      Loops through the found files until a new command is entered.
+-s                      Only the first option will play.
+-h, --help              Shows this message
+
+TERMS:
+For the most part, you can just enter a single-word term, and it will be added
+to the possible substrings included in the file name search. However, there are
+a few additional ways to refine your search.
+
+-and, --and, AND, and   Any of these keywords will cause the previous and next
+                        terms to be linked together, so that they MUST appear
+                        for the file to qualify.
+-or, --or, OR, or       Any of these keywords will cause the previous and next
+                        terms to be linked together, so that only one or the
+                        other needs to appear for the file to qualify.
+                        Overrides the -a option for those two terms.
+!                       Add this to the beginning of a term to ensure that the
+                        keyword does NOT appear in any matching file paths.
+m3u, playlist           Normally, playlists are ignored during the file search.
+                        However, this term will not only allow for their
+                        search, but will also give them higher precedence.""" % (sys.argv[0]))
+        exit(0)
+        
+    files, terms = searchDatabase(options)
+    
+    if len(files) == 0:
+        print("No files found", file=sys.stderr)
+        exit(1)
+    
+    random.shuffle(files)
+    files.sort(key=getValueFunction(terms))
+    for i in range(len(files)):
+        files[i] = files[i][1]
+    if "s" in options:
+        files = [files[0]]
+    for song in files:
+        print(song)
+
+    if "v" in options:
+        vlcArgs = ["vlc"]
+    else:
+        vlcArgs = ["cvlc"]
+    if "l" in options:
+        vlcArgs.append("--loop")
+    else:
+        files.append("vlc://quit")
+    vlcArgs += files
+    #print(" ".join(vlcArgs))
+    print("Launching VLC: %s" % (vlcArgs))
+    process = subprocess.Popen(vlcArgs, stdout=sys.stdout, stderr=sys.stderr)
+    if not "l" in options:
+        exit(process.wait())
+    else:
+        exit(0)
