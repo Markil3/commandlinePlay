@@ -1,21 +1,3 @@
-/*
- * 
- * Copyright (C) 2021 Markil 3
- * 
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- * 
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
-
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
 #include <sys/types.h>
@@ -248,7 +230,7 @@ int main(int argc, char **argv)
         return 1;
     }
     
-    fd = open(argv[1], O_RDONLY);
+    fd = open(argv[1], O_RDWR);
     
     if (fd < 0)
     {
@@ -257,6 +239,21 @@ int main(int argc, char **argv)
     }
     struct input_event ev;
 
+    /*
+     * Waits for a split second to let any keystrokes that triggered the program
+     * (i.e. the enter key used to execute the terminal command) to be processed)
+     */
+    sleep(1);
+    
+    int grabCode = ioctl(fd, EVIOCGRAB, 1);
+    if (grabCode < 0)
+    {
+        /*
+         * Something else probably has it
+         */
+        exit(4);
+    }
+    
     callSound("triggerActivate.wav");
     
     while (len >= 0 && ev.value != 0 || waitEnter == 0 || (ev.code != KEY_ENTER && ev.code != KEY_ESC))
@@ -297,6 +294,7 @@ int main(int argc, char **argv)
             }
         }
     }
+    ioctl(fd, EVIOCGRAB, 0);
     
     close(fd);
     ARGS[numArgs] = NULL;
