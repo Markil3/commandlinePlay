@@ -6,8 +6,13 @@ import subprocess
 import os
 import sys
 import random
+import re
 from os.path import exists
+from bisect import bisect_left, bisect_right
 import sqlite3
+
+MATCH_RATE = 0.7
+songVals = {}
 
 '''
 A sorting method for songs. It works by pushing file names with more matches up higher.
@@ -15,15 +20,28 @@ A sorting method for songs. It works by pushing file names with more matches up 
 def getValueFunction(terms):
     def valOfResult(song):
         val = 0
-        for arg in terms:
-            for part in song[2:]:
-                if arg in part.lower():
-                    val -= 1
-                    # Double every point received by a playlist
-                    if song[0] == True:
-                        val -= 1
-        #print("%s got %d hits" % (song, val))
-        return val
+        sortval = 0
+        if song in songVals:
+            val, sortval = songVals[song[1]][0]
+        else:
+            #print(song[1])
+            #print('\t', end='')
+            for arg in terms:
+                i = 1
+                for part in song[2:]:
+                    part = re.sub('[^A-Za-z ]', '', part).lower()
+                    if arg in part:
+                        val += 1
+                        # This helps make title matches more valuable
+                        sortval += 3 - 1
+                        #print("%d %s - %s" % (val, arg, part), end="\t")
+                    i += 1
+            songVals[song[1]] = (val, sortval)
+            #print()
+        # Double every point received by a playlist
+        if song[0] == True:
+            val *= 2
+        return (val, sortval)
     return valOfResult
 
 '''
@@ -70,6 +88,8 @@ def mergeWords(argList):
     return argList
 
 def extractOptions(args):
+    # Common words that are in a lot of song titles that we should avoid
+    commonWords = ["the", "off", "for", "from", "with", "and"]
     options = {}
     i = 0
     while i < len(args):
@@ -77,13 +97,34 @@ def extractOptions(args):
         if args[i].startswith("-") and args[i] != "-or" and args[i] != "-and" and args[i] != "--or" and args[i] != "--and":
             if args[i].startswith("--"):
                 if "=" in args[i]:
-                    options[args[i][2:args[i].index("=")]] = args[i][args[i].index("=") + 1:]
+                    val = args[i][args[i].index("=") + 1:]
+                    if re.sub('\.', '', val).isnumeric():
+                        if '.' in val:
+                            val = float(val)
+                        else:
+                            val = int(val)
+                    options[args[i][2:args[i].index("=")]] = val
                 else:
                     options[args[i][2:]] = True
             # These two have special meanings
             else:
+                lastChar = None
+                numBuilder = ''
                 for char in args[i][1:]:
-                    options[char] = True
+                    if char.isnumeric() or char == '.':
+                        numBuilder += char
+                    else:
+                        if numBuilder:
+                            if '.' in numBuilder:
+                                options[lastChar] = float(numBuilder)
+                            else:
+                                options[lastChar] = int(numBuilder)
+                            numBuilder = ''
+                        lastChar = char
+                        options[char] = True
+                if lastChar and numBuilder:
+                    options[lastChar] = float(numBuilder)
+                    numBuilder = ''
             del args[i]
         elif args[i] == "playlist" or args[i] == "m3u":
             options["playlist"] = True
@@ -92,6 +133,9 @@ def extractOptions(args):
             options["playlist"] = True
             args[i] = args[i][0:args[i].rindex(".m3u")]
             i += 1
+        # Remove problematic words
+        elif len(args[i]) < 3 or args[i].lower() in commonWords:
+            del args[i]
         else:
             i += 1
     return options
@@ -173,6 +217,17 @@ def appendDatabaseArguments(argList, args, options, playlist):
 
 def searchDatabase(options):
     files = []
+    addedUris = []
+    vals = []
+    minAcceptance = MATCH_RATE
+    if "match" in options:
+        minAcceptance = options["match"]
+    elif "m" in options:
+        minAcceptance = options["m"]
+    if minAcceptance > 10:
+        minAcceptance /= 100
+    elif minAcceptance > 1:
+        minAcceptance /= 10
     
     if "directory" in options:
         dbDir = Path(options["directory"])
@@ -185,16 +240,45 @@ def searchDatabase(options):
         terms = appendDatabaseArguments(findArgs, sys.argv[1:], options, True)
         findArgs = " ".join(findArgs) + ";"
         results = db.execute(findArgs);
+        
         for row in results:
-            files.append((True,) + row)
+            matches = 0
+            for term in terms:
+                if term in re.sub('[^A-Za-z ]', '', row[1]).lower():
+                    matches += 1
+            if matches >= minAcceptance * len(terms):
+                # Make playlist matches more important
+                matches *= 10
+                songVals[row[0]] = (matches, matches)
+                point = random.randint(bisect_left(vals, matches), bisect_right(vals, matches))
+                vals.insert(point, matches)
+                files.insert(point, (True,) + row)
+                addedUris.append(row[0])
         db.close()
     db = sqlite3.connect(str(Path(dbDir, "lollypop.db")))
     findArgs = "SELECT tracks.uri, tracks.name, albums.name, artists.name FROM tracks INNER JOIN albums ON tracks.album_id = albums.id INNER JOIN track_artists ON tracks.id = track_artists.track_id INNER JOIN artists ON track_artists.artist_id = artists.id WHERE".split(" ")
     terms = appendDatabaseArguments(findArgs, sys.argv[1:], options, False)
+    findArgs.append("GROUP")
+    findArgs.append("BY")
+    findArgs.append("tracks.uri")
     findArgs = " ".join(findArgs) + ";"
+    #print(findArgs)
     results = db.execute(findArgs);
+    
+    evaluate = getValueFunction(terms)
+    
     for row in results:
-        files.append((False,) + row)
+        # Skip any songs added as part of a playlist
+        if row[0] in addedUris:
+            continue
+        #print(row[1])
+        row = (False,) + row
+        val = evaluate(row)
+        if val[0] >= minAcceptance * len(terms):
+            # Inserts it in order, but random to matches of an equal stature
+            point = random.randint(bisect_left(vals, val[1]), bisect_right(vals, val[1]))
+            vals.insert(point, val[1])
+            files.insert(point, row)
     db.close()
     
     return (files, terms)
@@ -206,7 +290,6 @@ if __name__ == "__main__":
         print("VLC Media Player is not installed", file=sys.stderr)
         exit(1)
     
-    print(sys.argv)
     mergeWords(sys.argv)
     options = extractOptions(sys.argv)
     if "h" in options or "help" in options:
@@ -217,9 +300,12 @@ OPTIONS:
 --directory=[dir]       Define the database directory.
 -a                      The search must match every single term
 -v                      Displays the media player
--l                      Loops through the found files until a new command is entered.
+-l                      Loops through the found files until a new command is
+                        entered.
 -s                      Only the first option will play.
 -h, --help              Shows this message
+-m[rate], --match=<rate>All matches must have this percentage of matching
+                        keywords in order to be included. Defaults to 0.65.
 
 TERMS:
 For the most part, you can just enter a single-word term, and it will be added
@@ -246,14 +332,17 @@ m3u, playlist           Normally, playlists are ignored during the file search.
         print("No files found", file=sys.stderr)
         exit(1)
     
-    random.shuffle(files)
-    files.sort(key=getValueFunction(terms))
+    files.reverse()
+    
     for i in range(len(files)):
         files[i] = files[i][1]
     if "s" in options:
         files = [files[0]]
     for song in files:
-        print(song)
+        if song in songVals:
+            print("%02d - %s" % (songVals[song][0], song))
+        else:
+            print("Pl - %s" % (song))
 
     if "v" in options:
         vlcArgs = ["vlc"]
