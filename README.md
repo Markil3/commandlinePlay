@@ -5,6 +5,9 @@ It works in two parts. The first one, the play python module, does most of the w
 
 The second part, the key listener, will listen for arguments for the python module from the keyboard without changing window focus, with audio feedback to ensure that the user knows that they are inputing into the program. This part will need to be run by a user added to the `input` user group.
 
+### Archived
+For updates, see https://github.com/Markil3/LollypopInt
+
 ## Building
 
 The listener can be built with the following command
