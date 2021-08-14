@@ -6,10 +6,28 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
+#include <time.h>
 #include <string.h>
 #include <pwd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+
+int msleep(long time)
+{
+    struct timespec timeDet;
+    int res;
+    timeDet.tv_sec = time / 1000;
+    timeDet.tv_nsec = (time % 1000) * 1000000;
+    
+    do
+    {
+        res = nanosleep(&timeDet, &timeDet);
+    }
+    while (res && errno == EINTR);
+    
+    return res;
+}
 
 int callSound(char* path)
 {
@@ -243,7 +261,7 @@ int main(int argc, char **argv)
      * Waits for a split second to let any keystrokes that triggered the program
      * (i.e. the enter key used to execute the terminal command) to be processed)
      */
-    sleep(1);
+    msleep(250);
     
     int grabCode = ioctl(fd, EVIOCGRAB, 1);
     if (grabCode < 0)
@@ -316,9 +334,22 @@ int main(int argc, char **argv)
     callSound("triggerDeactivate.wav");
     
     printf("Running args: ");
+    FILE* store = fopen("/tmp/play_args.txt", "w");
+    if (store < 0)
+    {
+        printf("Could not record arguments");
+    }
     for (int i = 0; i <= numArgs; i++)
     {
         printf("'%s' ", ARGS[i]);
+        if (store >= 0 && i > 0 && ARGS[i] != NULL)
+        {
+            fprintf(store, "%s ", ARGS[i]);
+        }
+    }
+    if (store >= 0)
+    {
+        fclose(store);
     }
     printf("\n");
     
